@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Chat Test</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      max-width: 600px;
+      margin: auto;
+      padding: 1em;
+      background-color: #f9f9f9;
+    }
+    #messages {
+      border: 1px solid #ccc;
+      height: 300px;
+      overflow-y: scroll;
+      padding: 1em;
+      background: white;
+      margin-bottom: 1em;
+    }
+    #messages div {
+      margin-bottom: 0.5em;
+      line-height: 1.4;
+    }
+    input[type="text"], input[type="password"] {
+      width: 100%;
+      padding: 0.5em;
+      margin: 0.2em 0;
+    }
+    button {
+      padding: 0.5em;
+      margin: 0.2em;
+    }
+  </style>
+</head>
+<body>
+
+<h2>🔹 Chatroom Test</h2>
+
+<!-- Login Form -->
+<div id="loginSection">
+  <h3>Login</h3>
+  <input type="text" id="username" placeholder="Username" />
+  <input type="password" id="password" placeholder="Password" />
+  <button onclick="login()">Login</button>
+  <div id="loginStatus"></div>
+</div>
+
+<!-- Chat Section (hidden until login) -->
+<div id="chatSection" style="display: none;">
+  <h3>Start Private Chat With:</h3>
+  <div id="chatButtonsContainer"></div>
+
+  <label>
+    Chatroom Name:
+    <input type="text" id="chatroomName" value="general" />
+  </label>
+  <button id="connectBtn">Connect</button>
+
+  <div id="messages"></div>
+
+  <input type="text" id="messageInput" placeholder="Type a message..." disabled />
+  <button id="sendBtn" disabled>Send</button>
+</div>
+
+<script>
+  let socket = null;
+
+  const chatroomInput = document.getElementById('chatroomName');
+  const connectBtn = document.getElementById('connectBtn');
+  const messagesDiv = document.getElementById('messages');
+  const messageInput = document.getElementById('messageInput');
+  const sendBtn = document.getElementById('sendBtn');
+  const loginStatus = document.getElementById('loginStatus');
+  const loginSection = document.getElementById('loginSection');
+  const chatSection = document.getElementById('chatSection');
+  const chatButtonsContainer = document.getElementById('chatButtonsContainer');
+
+  function addMessage(text, isError = false) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    if (isError) div.style.color = 'red';
+    messagesDiv.appendChild(div);
+    messagesDiv.scrollTop = messagesDiv.scrollHeight;
+  }
+
+  async function login() {
+    const username = document.getElementById('username').value.trim();
+    const password = document.getElementById('password').value.trim();
+
+    if (!username || !password) {
+      loginStatus.textContent = "❌ Username and password required";
+      return;
+    }
+
+    const response = await fetch("http://127.0.0.1:8000/chat/LoginView/", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, password })
+    });
+
+    if (response.ok) {
+      const data = await response.json();
+      localStorage.setItem("accessToken", data.access);
+      localStorage.setItem("refreshToken", data.refresh);
+      localStorage.setItem("username", username);
+
+      loginStatus.textContent = "✅ Login successful!";
+      loginSection.style.display = "none";
+      chatSection.style.display = "block";
+
+      await loadUsersToChatWith();
+    } else {
+      loginStatus.textContent = "❌ Invalid credentials";
+    }
+  }
+
+  async function loadUsersToChatWith() {
+    const loggedInUsername = localStorage.getItem("username");
+    const accessToken = localStorage.getItem("accessToken");
+
+    const res = await fetch("http://127.0.0.1:8000/chat/all_users/", {
+      headers: {
+        'Authorization': `Bearer ${accessToken}`
+      }
+    });
+
+    if (!res.ok) {
+      addMessage("❌ Could not fetch users", true);
+      return;
+    }
+
+    const users = await res.json();  // [{username: 'superuser'}, ...]
+    chatButtonsContainer.innerHTML = '';
+
+    users
+      .filter(user => user.username !== loggedInUsername)
+      .forEach(user => {
+        const btn = document.createElement("button");
+        btn.innerText = `Chat with ${user.username}`;
+        btn.onclick = () => startPrivateChat(user.username);
+        chatButtonsContainer.appendChild(btn);
+      });
+  }
+
+function connectToChatroom() {
+  const chatroomName = chatroomInput.value.trim();
+  if (!chatroomName) {
+    alert('Enter a chatroom name!');
+    return;
+  }
+
+  if (socket && socket.readyState === WebSocket.OPEN) {
+    socket.close();
+  }
+
+  const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
+  const token = localStorage.getItem("accessToken");  // 👈 get JWT token from storage
+
+  const wsUrl = `${protocol}://${window.location.host}/ws/chatroom/${chatroomName}/?token=${token}`;
+
+  socket = new WebSocket(wsUrl);
+
+  socket.onopen = () => {
+    addMessage(`✅ Connected to chatroom: ${chatroomName}`);
+    messageInput.disabled = false;
+    sendBtn.disabled = false;
+  };
+
+  socket.onmessage = (event) => {
+    try {
+      const data = JSON.parse(event.data);
+      if (data.type === 'chat.message') {
+        const msg = data.message;
+        addMessage(`[${msg.created_at}] ${msg.author}: ${msg.body}`);
+      } else {
+        addMessage(`ℹ️ Message received: ${event.data}`);
+      }
+    } catch (e) {
+      addMessage('⚠️ Error parsing message', true);
+    }
+  };
+
+  socket.onclose = () => {
+    addMessage('🔌 Disconnected from chatroom');
+    messageInput.disabled = true;
+    sendBtn.disabled = true;
+  };
+
+  socket.onerror = (e) => {
+    console.error('WebSocket error:', e);
+    addMessage('❌ WebSocket error — check server or backend logs.', true);
+  };
+}
+  connectBtn.addEventListener('click', connectToChatroom);
+
+  sendBtn.addEventListener('click', () => {
+    const message = messageInput.value.trim();
+    if (!message || !socket || socket.readyState !== WebSocket.OPEN) return;
+
+    const payload = JSON.stringify({ body: message });
+    socket.send(payload);
+    messageInput.value = '';
+  });
+
+  messageInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      sendBtn.click();
+    }
+  });
+
+  async function startPrivateChat(username) {
+    const accessToken = localStorage.getItem("accessToken");
+
+    if (!accessToken) {
+      addMessage('❌ You must be logged in to start a private chat.', true);
+      return;
+    }
+
+    const response = await fetch(`http://127.0.0.1:8000/chat/get_or_create_private_chatroom/${username}/`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${accessToken}`
+      }
+    });
+
+    if (!response.ok) {
+      addMessage('❌ Could not start chat with ' + username, true);
+      return;
+    }
+
+    const data = await response.json();
+    const roomName = data.group_name;
+    chatroomInput.value = roomName;
+    connectToChatroom();
+  }
+</script>
+
+</body>
+</html>
